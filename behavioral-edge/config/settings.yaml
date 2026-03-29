@@ -1,0 +1,136 @@
+# ─────────────────────────────────────────────
+#  behavioral-edge  /  config/settings.yaml
+#  All secrets should be supplied via env vars
+#  (POLYGON_API_KEY, etc.) or a .env file.
+#  Placeholder strings are intentionally not
+#  real keys — never commit real credentials.
+# ─────────────────────────────────────────────
+
+# ── API credentials ────────────────────────────────────────────────────────────
+api:
+  polygon:
+    api_key: "${POLYGON_API_KEY}"
+    base_url: "https://api.polygon.io"
+    rate_limit_per_minute: 5          # free tier; bump to 100+ for paid
+
+  schwab:
+    app_key: "${SCHWAB_APP_KEY}"
+    app_secret: "${SCHWAB_APP_SECRET}"
+    redirect_uri: "https://127.0.0.1"
+    token_path: "~/.schwab_token.json"
+
+  finnhub:
+    api_key: "${FINNHUB_API_KEY}"
+    base_url: "https://finnhub.io/api/v1"
+
+  alpha_vantage:
+    api_key: "${ALPHA_VANTAGE_API_KEY}"
+
+  reddit:
+    client_id: "${REDDIT_CLIENT_ID}"
+    client_secret: "${REDDIT_CLIENT_SECRET}"
+    user_agent: "behavioral-edge/0.1 by u/your_username"
+    username: "${REDDIT_USERNAME}"
+    password: "${REDDIT_PASSWORD}"
+
+  apewisdom:
+    base_url: "https://apewisdom.io/api/v1.0"
+    # No API key required
+
+# ── Database ───────────────────────────────────────────────────────────────────
+database:
+  path: "data/behavioral_edge.db"
+  # To switch to PostgreSQL in prod, change engine to:
+  # postgresql+psycopg2://user:pass@host:5432/dbname
+  wal_mode: true
+  cache_size_kb: 65536              # 64 MB page cache
+
+# ── Universe filters ───────────────────────────────────────────────────────────
+universe:
+  start_date: "2020-01-01"
+  end_date: null                    # null = today
+  market_cap_min: 300_000_000       # $300M
+  market_cap_max: 5_000_000_000     # $5B
+  min_price: 5.00
+  min_avg_volume: 500_000           # shares / day (20-day avg)
+  exchanges:
+    - "NYSE"
+    - "NASDAQ"
+  include_delisted: true            # critical for survivorship-bias avoidance
+
+# ── Data ingestion ─────────────────────────────────────────────────────────────
+pipeline:
+  batch_size: 50                    # tickers per API batch
+  max_workers: 4                    # concurrent threads
+  retry_attempts: 3
+  retry_wait_seconds: 2
+  request_timeout: 30
+
+  # Options: only pull chains for tickers with avg daily vol > threshold
+  options_min_volume: 1_000_000
+
+  # WSB sentiment
+  wsb_subreddits:
+    - "wallstreetbets"
+    - "stocks"
+    - "investing"
+  wsb_lookback_days: 7
+  sentiment_model: "vader"          # "vader" | "finbert"
+  finbert_model_name: "ProsusAI/finbert"
+
+  # Catalysts
+  catalyst_types:
+    - earnings
+    - analyst_upgrade
+    - analyst_downgrade
+    - fda
+    - news
+
+# ── Herd score ─────────────────────────────────────────────────────────────────
+herd_score:
+  # Component weights (social + options must sum to 1.0)
+  weight_social: 0.40
+  weight_options: 0.60
+
+  # Social sub-weights (must sum to 1.0)
+  social_mention_velocity: 0.40
+  social_mention_count_vs_baseline: 0.30
+  social_sentiment_magnitude: 0.30
+
+  # Options sub-weights (must sum to 1.0)
+  options_unusual_volume: 0.40
+  options_call_put_deviation: 0.30
+  options_oi_accumulation: 0.30
+
+  # Normalization lookback (days) for rolling percentile
+  normalization_window: 90
+
+  # Stage thresholds (based on mention_velocity + OI change rate)
+  stage_forming_velocity_min: 0.20
+  stage_saturated_velocity_max: -0.10
+  # Between these → "saturated"
+
+# ── Scanner thresholds ─────────────────────────────────────────────────────────
+scanner:
+  min_relative_volume: 3.0
+  min_herd_score: 4.0
+  min_gap_pct: 0.02                 # 2% pre-market gap to trigger scan
+
+# ── Backtest ───────────────────────────────────────────────────────────────────
+backtest:
+  starting_capital: 100_000
+  max_positions: 5
+  max_daily_loss_pct: 0.02          # 2% of account = hard stop
+  commission_per_share: 0.005
+  slippage_model: "fixed_pct"       # "fixed_pct" | "volume_impact"
+  slippage_pct: 0.001               # 0.1%
+  position_size_pct: 0.20           # 20% of capital per position (max)
+  margin_multiplier: 2.0
+  eod_close_time: "15:55"           # force exit 5 min before close
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging:
+  level: "INFO"                     # DEBUG | INFO | WARNING | ERROR
+  log_dir: "logs/"
+  json_logs: false                  # set true for log aggregators (Datadog, etc.)
+  console: true
