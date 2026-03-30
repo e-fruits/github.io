@@ -1,0 +1,12 @@
+tickers:
+  - ticker: "MOCK1"
+    reason: "Example blocked security"
+  - ticker: "MOCK2"
+    reason: "Example blocked security"
+
+sectors:
+  - sector: "Military & Defense"
+    reason: "MI sector blocklist"
+
+industries: []
+
