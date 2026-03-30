@@ -1,0 +1,13 @@
+# Compliance blocklist — MI (mortgage insurance) sector and related names.
+# The system will refuse to trade or analyze these tickers.
+# Add any additional names your compliance team requires.
+
+blocked_tickers:
+  - ACGL    # Arch Capital Group / Arch MI
+  - NMIH    # NMI Holdings
+  - ESNT    # Essent Group
+  - RDN     # Radian Group
+  - MTG     # MGIC Investment
+  - RKT     # Rocket Companies
+  - UWMC    # UWM Holdings
+  - PFSI    # PennyMac Financial Services
