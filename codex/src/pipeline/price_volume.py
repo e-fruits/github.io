@@ -17,7 +17,7 @@ from src.utils.timestamps import ensure_utc_timestamp
 LOGGER = logging.getLogger(__name__)
 
 
-@dataclass(slots=True)
+@dataclass
 class DailyBar:
     trade_date: date
     ticker: str
@@ -30,7 +30,7 @@ class DailyBar:
     as_of_timestamp: datetime
 
 
-@dataclass(slots=True)
+@dataclass
 class PremarketSnapshot:
     trade_date: date
     ticker: str

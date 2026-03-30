@@ -15,7 +15,7 @@ from src.utils.timestamps import ensure_utc_timestamp, trading_days
 LOGGER = logging.getLogger(__name__)
 
 
-@dataclass(slots=True)
+@dataclass
 class UniverseCandidate:
     date: date
     ticker: str

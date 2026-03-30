@@ -1,39 +1,55 @@
 from datetime import date
 from pathlib import Path
 
-from src.signals.crowding_index import build_crowding_index_record
+from src.signals.scanner import HistoricalScanner
 from src.utils.config import load_settings
 from src.utils.db import DatabaseManager
 
 
-def test_crowding_index_builds_scores_and_labels(tmp_path: Path) -> None:
+def test_scanner_generates_watchlist_row(tmp_path: Path) -> None:
     settings = load_settings(Path("config/settings.yaml"))
-    db_path = tmp_path / "crowding.sqlite"
+    db_path = tmp_path / "scanner.sqlite"
     settings.database.path = db_path
     db = DatabaseManager(db_path)
     db.initialize()
 
+    db.upsert_universe(
+        [
+            {
+                "date": "2024-01-22",
+                "ticker": "ABCD",
+                "company_name": "Alpha Beta Corp",
+                "market_cap": 750_000_000,
+                "sector": "Technology",
+                "exchange": "NASDAQ",
+                "avg_volume_20d": 1_000_000,
+                "avg_dollar_volume_20d": 10_000_000,
+                "is_active": 1,
+                "as_of_timestamp": "2024-01-22T13:00:00+00:00",
+            }
+        ]
+    )
     db.upsert_daily_prices(
         [
             {
-                "date": "2024-01-20",
+                "date": "2024-01-10",
                 "ticker": "ABCD",
-                "open": 48.5,
-                "high": 49.2,
-                "low": 47.8,
-                "close": 48.9,
-                "volume": 1000000,
-                "vwap": 48.7,
-                "dollar_volume": 48900000,
-                "relative_volume_20d": 1.2,
-                "gap_pct": 0.03,
-                "intraday_range_pct": 0.028,
-                "pre_market_high": 49.8,
-                "pre_market_low": 48.7,
-                "pre_market_volume": 90000,
-                "pre_market_dollar_volume": 4400000,
-                "pre_market_relative_volume": 1.5,
-                "as_of_timestamp": "2024-01-20T20:00:00+00:00",
+                "open": 45.0,
+                "high": 46.0,
+                "low": 44.5,
+                "close": 45.5,
+                "volume": 900000,
+                "vwap": 45.4,
+                "dollar_volume": 40950000,
+                "relative_volume_20d": 1.1,
+                "gap_pct": 0.02,
+                "intraday_range_pct": 0.033,
+                "pre_market_high": 45.7,
+                "pre_market_low": 45.1,
+                "pre_market_volume": 70000,
+                "pre_market_dollar_volume": 3200000,
+                "pre_market_relative_volume": 1.2,
+                "as_of_timestamp": "2024-01-10T20:00:00+00:00",
             },
             {
                 "date": "2024-01-22",
@@ -55,6 +71,21 @@ def test_crowding_index_builds_scores_and_labels(tmp_path: Path) -> None:
                 "pre_market_relative_volume": 1.8,
                 "as_of_timestamp": "2024-01-22T20:00:00+00:00",
             },
+        ]
+    )
+    db.upsert_catalysts(
+        [
+            {
+                "date": "2024-01-22",
+                "ticker": "ABCD",
+                "catalyst_bucket": "earnings",
+                "catalyst_detail": "Quarterly earnings report",
+                "catalyst_direction": "positive",
+                "pre_market_gap_pct": 0.06,
+                "source": "finnhub",
+                "source_timestamp": "2024-01-22T12:00:00+00:00",
+                "as_of_timestamp": "2024-01-22T12:05:00+00:00",
+            }
         ]
     )
     db.upsert_wsb_mentions(
@@ -112,11 +143,11 @@ def test_crowding_index_builds_scores_and_labels(tmp_path: Path) -> None:
         ]
     )
 
-    record = build_crowding_index_record(settings, db, "ABCD", date(2024, 1, 22))
+    scanner = HistoricalScanner(settings=settings, db=db)
+    count = scanner.scan_day(date(2024, 1, 22))
 
-    assert record["attention"] in {"low", "medium", "high"}
-    assert record["positioning_pressure"] in {"low", "medium", "high"}
-    assert record["crowd_trap_risk"] in {"absent", "present"}
-    assert 0.0 <= record["attention_score"] <= 1.0
-    assert 0.0 <= record["positioning_score"] <= 1.0
-    assert 0.0 <= record["trap_score"] <= 1.0
+    assert count == 1
+    with db.connect() as connection:
+        row = connection.execute("SELECT suggested_setup, attention, positioning_pressure FROM watchlist WHERE ticker='ABCD'").fetchone()
+    assert row is not None
+    assert row["suggested_setup"] in {"long_continuation", "long_mean_reversion", "skip", "short_continuation", "short_mean_reversion"}

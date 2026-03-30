@@ -22,6 +22,69 @@ catalysts:
   include_company_news: true
   chunk_size: 250
 
+wsb:
+  sources:
+    - apewisdom
+    - praw
+    - kaggle
+  rolling_window_days: 20
+  apewisdom_top_n: 50
+  sentiment_model: "finbert"
+  fallback_sentiment_model: "vader"
+  subreddit: "wallstreetbets"
+  kaggle_dataset_path: "data/raw/kaggle/wsb_historical.csv"
+
+options_flow:
+  adjusted: true
+  rolling_window_days: 20
+  use_trade_level_small_lot_estimate: true
+
+short_interest:
+  report_publication_lag_business_days: 8
+  use_latest_available_as_of_date: true
+
+signals:
+  attention:
+    medium_threshold: 0.4
+    high_threshold: 0.7
+    mention_velocity_cap: 3.0
+    mention_vs_baseline_cap: 5.0
+    unusual_options_volume_cap: 4.0
+    wsb_weight: 0.75
+    options_weight: 0.25
+  positioning:
+    medium_threshold: 0.4
+    high_threshold: 0.7
+    small_lot_call_put_ratio_cap: 4.0
+    unusual_options_volume_cap: 4.0
+    short_pct_float_cap: 0.35
+    days_to_cover_cap: 12.0
+  trap_risk:
+    present_threshold: 0.65
+    round_number_band_pct: 0.02
+    yearly_extreme_band_pct: 0.03
+    support_resistance_band_pct: 0.025
+    round_numbers:
+      - 10
+      - 20
+      - 50
+      - 100
+  premarket:
+    meaningful_gap_pct: 0.04
+    min_relative_volume: 1.0
+    min_dollar_volume: 500000
+    max_spread_estimate_pct: 0.03
+  squeeze_risk:
+    block_threshold: 0.7
+    short_pct_float_cap: 0.35
+    days_to_cover_cap: 12.0
+    low_float_cap: 25000000
+    upward_attention_cap: 1.0
+    gap_magnitude_cap: 0.2
+  scanner:
+    continuation_score_threshold: 0.62
+    mean_reversion_score_threshold: 0.52
+
 universe:
   min_market_cap: 300000000
   max_market_cap: 5000000000
@@ -44,10 +107,14 @@ providers:
     base_url: "https://finnhub.io/api/v1"
   yahoo_finance:
     enabled: true
+  apewisdom:
+    base_url: "https://apewisdom.io/api/v1.0"
   reddit:
     client_id: ""
     client_secret: ""
     user_agent: "catalyst-crowding-research"
+  finra:
+    base_url: "https://api.finra.org"
 
 compliance:
   blocklist_path: "config/blocked_tickers.yaml"
