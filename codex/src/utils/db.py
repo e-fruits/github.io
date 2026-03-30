@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -327,3 +328,117 @@ class DatabaseManager:
                 rows,
             )
             connection.commit()
+
+    def upsert_wsb_mentions(self, rows: Iterable[dict[str, object]]) -> None:
+        rows = list(rows)
+        if not rows:
+            return
+        with self.connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO wsb_mentions (
+                    date, ticker, mention_count, mention_count_prior_day,
+                    mention_velocity_pct, mention_vs_baseline, sentiment_score,
+                    sentiment_unanimity, upvotes, rank, rank_change_24h,
+                    as_of_timestamp, source
+                ) VALUES (
+                    :date, :ticker, :mention_count, :mention_count_prior_day,
+                    :mention_velocity_pct, :mention_vs_baseline, :sentiment_score,
+                    :sentiment_unanimity, :upvotes, :rank, :rank_change_24h,
+                    :as_of_timestamp, :source
+                )
+                ON CONFLICT(date, ticker, source) DO UPDATE SET
+                    mention_count = excluded.mention_count,
+                    mention_count_prior_day = excluded.mention_count_prior_day,
+                    mention_velocity_pct = excluded.mention_velocity_pct,
+                    mention_vs_baseline = excluded.mention_vs_baseline,
+                    sentiment_score = excluded.sentiment_score,
+                    sentiment_unanimity = excluded.sentiment_unanimity,
+                    upvotes = excluded.upvotes,
+                    rank = excluded.rank,
+                    rank_change_24h = excluded.rank_change_24h,
+                    as_of_timestamp = excluded.as_of_timestamp
+                """,
+                rows,
+            )
+            connection.commit()
+
+    def upsert_options_flow_daily(self, rows: Iterable[dict[str, object]]) -> None:
+        rows = list(rows)
+        if not rows:
+            return
+        with self.connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO options_flow_daily (
+                    date, ticker, total_call_volume, total_put_volume, call_put_ratio,
+                    total_call_oi, total_put_oi, oi_change_calls, oi_change_puts,
+                    unusual_volume_ratio, small_lot_call_volume, small_lot_put_volume,
+                    small_lot_call_pct, as_of_timestamp
+                ) VALUES (
+                    :date, :ticker, :total_call_volume, :total_put_volume, :call_put_ratio,
+                    :total_call_oi, :total_put_oi, :oi_change_calls, :oi_change_puts,
+                    :unusual_volume_ratio, :small_lot_call_volume, :small_lot_put_volume,
+                    :small_lot_call_pct, :as_of_timestamp
+                )
+                ON CONFLICT(date, ticker) DO UPDATE SET
+                    total_call_volume = excluded.total_call_volume,
+                    total_put_volume = excluded.total_put_volume,
+                    call_put_ratio = excluded.call_put_ratio,
+                    total_call_oi = excluded.total_call_oi,
+                    total_put_oi = excluded.total_put_oi,
+                    oi_change_calls = excluded.oi_change_calls,
+                    oi_change_puts = excluded.oi_change_puts,
+                    unusual_volume_ratio = excluded.unusual_volume_ratio,
+                    small_lot_call_volume = excluded.small_lot_call_volume,
+                    small_lot_put_volume = excluded.small_lot_put_volume,
+                    small_lot_call_pct = excluded.small_lot_call_pct,
+                    as_of_timestamp = excluded.as_of_timestamp
+                """,
+                rows,
+            )
+            connection.commit()
+
+    def upsert_short_interest(self, rows: Iterable[dict[str, object]]) -> None:
+        rows = list(rows)
+        if not rows:
+            return
+        with self.connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO short_interest (
+                    report_date, settlement_date, ticker, short_interest_shares,
+                    shares_outstanding, float_shares, short_pct_float, days_to_cover,
+                    as_of_timestamp
+                ) VALUES (
+                    :report_date, :settlement_date, :ticker, :short_interest_shares,
+                    :shares_outstanding, :float_shares, :short_pct_float, :days_to_cover,
+                    :as_of_timestamp
+                )
+                ON CONFLICT(report_date, ticker) DO UPDATE SET
+                    settlement_date = excluded.settlement_date,
+                    short_interest_shares = excluded.short_interest_shares,
+                    shares_outstanding = excluded.shares_outstanding,
+                    float_shares = excluded.float_shares,
+                    short_pct_float = excluded.short_pct_float,
+                    days_to_cover = excluded.days_to_cover,
+                    as_of_timestamp = excluded.as_of_timestamp
+                """,
+                rows,
+            )
+            connection.commit()
+
+    def fetch_latest_short_interest_as_of(self, ticker: str, as_of_timestamp: datetime) -> sqlite3.Row | None:
+        with self.connect() as connection:
+            return connection.execute(
+                """
+                SELECT report_date, settlement_date, ticker, short_interest_shares,
+                       shares_outstanding, float_shares, short_pct_float, days_to_cover,
+                       as_of_timestamp
+                FROM short_interest
+                WHERE ticker = ? AND as_of_timestamp <= ?
+                ORDER BY as_of_timestamp DESC, settlement_date DESC
+                LIMIT 1
+                """,
+                (ticker, as_of_timestamp.isoformat()),
+            ).fetchone()

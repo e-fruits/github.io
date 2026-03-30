@@ -22,6 +22,27 @@ catalysts:
   include_company_news: true
   chunk_size: 250
 
+wsb:
+  sources:
+    - apewisdom
+    - praw
+    - kaggle
+  rolling_window_days: 20
+  apewisdom_top_n: 50
+  sentiment_model: "finbert"
+  fallback_sentiment_model: "vader"
+  subreddit: "wallstreetbets"
+  kaggle_dataset_path: "data/raw/kaggle/wsb_historical.csv"
+
+options_flow:
+  adjusted: true
+  rolling_window_days: 20
+  use_trade_level_small_lot_estimate: true
+
+short_interest:
+  report_publication_lag_business_days: 8
+  use_latest_available_as_of_date: true
+
 universe:
   min_market_cap: 300000000
   max_market_cap: 5000000000
@@ -44,10 +65,14 @@ providers:
     base_url: "https://finnhub.io/api/v1"
   yahoo_finance:
     enabled: true
+  apewisdom:
+    base_url: "https://apewisdom.io/api/v1.0"
   reddit:
     client_id: ""
     client_secret: ""
     user_agent: "catalyst-crowding-research"
+  finra:
+    base_url: "https://api.finra.org"
 
 compliance:
   blocklist_path: "config/blocked_tickers.yaml"
