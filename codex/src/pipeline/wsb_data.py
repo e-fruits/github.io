@@ -20,7 +20,7 @@ TICKER_PATTERN = re.compile(r"\b[A-Z]{1,5}\b")
 STOPWORDS = {"A", "I", "AI", "IT", "ALL", "FOR", "YOLO", "WSB", "USA"}
 
 
-@dataclass(slots=True)
+@dataclass
 class ApeWisdomMention:
     trade_date: date
     ticker: str
@@ -31,7 +31,7 @@ class ApeWisdomMention:
     as_of_timestamp: datetime
 
 
-@dataclass(slots=True)
+@dataclass
 class RedditMessage:
     created_at: datetime
     ticker: str

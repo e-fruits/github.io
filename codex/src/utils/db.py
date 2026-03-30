@@ -253,6 +253,18 @@ class DatabaseManager:
             )
             return [str(row["ticker"]) for row in cursor.fetchall()]
 
+    def fetch_universe_rows(self, trade_date: str) -> list[sqlite3.Row]:
+        with self.connect() as connection:
+            return connection.execute(
+                """
+                SELECT *
+                FROM universe
+                WHERE date = ?
+                ORDER BY ticker
+                """,
+                (trade_date,),
+            ).fetchall()
+
     def upsert_daily_prices(self, rows: Iterable[dict[str, object]]) -> None:
         rows = list(rows)
         if not rows:
@@ -304,6 +316,31 @@ class DatabaseManager:
                 (ticker, trade_date),
             ).fetchone()
             return None if row is None else row["gap_pct"]
+
+    def fetch_price_history(self, ticker: str, trade_date: str, limit: int = 252) -> list[sqlite3.Row]:
+        with self.connect() as connection:
+            return connection.execute(
+                """
+                SELECT *
+                FROM daily_prices
+                WHERE ticker = ? AND date < ?
+                ORDER BY date DESC
+                LIMIT ?
+                """,
+                (ticker, trade_date, limit),
+            ).fetchall()
+
+    def fetch_options_flow_row(self, ticker: str, trade_date: str) -> sqlite3.Row | None:
+        with self.connect() as connection:
+            return connection.execute(
+                """
+                SELECT *
+                FROM options_flow_daily
+                WHERE ticker = ? AND date = ?
+                LIMIT 1
+                """,
+                (ticker, trade_date),
+            ).fetchone()
 
     def upsert_catalysts(self, rows: Iterable[dict[str, object]]) -> None:
         rows = list(rows)
@@ -442,3 +479,109 @@ class DatabaseManager:
                 """,
                 (ticker, as_of_timestamp.isoformat()),
             ).fetchone()
+
+    def fetch_row_by_date(self, table: str, ticker: str, trade_date: str) -> sqlite3.Row | None:
+        allowed_tables = {"universe", "daily_prices", "options_flow_daily", "crowding_index", "watchlist"}
+        if table not in allowed_tables:
+            raise ValueError(f"Unsupported table lookup: {table}")
+        with self.connect() as connection:
+            return connection.execute(
+                f"""
+                SELECT *
+                FROM {table}
+                WHERE ticker = ? AND date = ?
+                LIMIT 1
+                """,
+                (ticker, trade_date),
+            ).fetchone()
+
+    def fetch_wsb_rows(self, ticker: str, trade_date: str) -> list[sqlite3.Row]:
+        with self.connect() as connection:
+            return connection.execute(
+                """
+                SELECT *
+                FROM wsb_mentions
+                WHERE ticker = ? AND date = ?
+                ORDER BY source
+                """,
+                (ticker, trade_date),
+            ).fetchall()
+
+    def fetch_catalyst_rows(self, ticker: str, trade_date: str) -> list[sqlite3.Row]:
+        with self.connect() as connection:
+            return connection.execute(
+                """
+                SELECT *
+                FROM catalysts
+                WHERE ticker = ? AND date = ?
+                ORDER BY source_timestamp
+                """,
+                (ticker, trade_date),
+            ).fetchall()
+
+    def upsert_crowding_index(self, rows: Iterable[dict[str, object]]) -> None:
+        rows = list(rows)
+        if not rows:
+            return
+        with self.connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO crowding_index (
+                    date, ticker, attention, positioning_pressure, crowd_trap_risk,
+                    attention_score, positioning_score, trap_score, component_details, as_of_timestamp
+                ) VALUES (
+                    :date, :ticker, :attention, :positioning_pressure, :crowd_trap_risk,
+                    :attention_score, :positioning_score, :trap_score, :component_details, :as_of_timestamp
+                )
+                ON CONFLICT(date, ticker) DO UPDATE SET
+                    attention = excluded.attention,
+                    positioning_pressure = excluded.positioning_pressure,
+                    crowd_trap_risk = excluded.crowd_trap_risk,
+                    attention_score = excluded.attention_score,
+                    positioning_score = excluded.positioning_score,
+                    trap_score = excluded.trap_score,
+                    component_details = excluded.component_details,
+                    as_of_timestamp = excluded.as_of_timestamp
+                """,
+                rows,
+            )
+            connection.commit()
+
+    def upsert_watchlist(self, rows: Iterable[dict[str, object]]) -> None:
+        rows = list(rows)
+        if not rows:
+            return
+        with self.connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO watchlist (
+                    date, ticker, catalyst_bucket, catalyst_direction, catalyst_detail,
+                    pre_market_gap_pct, pre_market_relative_volume, pre_market_dollar_volume,
+                    attention, positioning_pressure, crowd_trap_risk, short_interest_pct_float,
+                    days_to_cover, suggested_setup, setup_score, short_tradable, as_of_timestamp
+                ) VALUES (
+                    :date, :ticker, :catalyst_bucket, :catalyst_direction, :catalyst_detail,
+                    :pre_market_gap_pct, :pre_market_relative_volume, :pre_market_dollar_volume,
+                    :attention, :positioning_pressure, :crowd_trap_risk, :short_interest_pct_float,
+                    :days_to_cover, :suggested_setup, :setup_score, :short_tradable, :as_of_timestamp
+                )
+                ON CONFLICT(date, ticker) DO UPDATE SET
+                    catalyst_bucket = excluded.catalyst_bucket,
+                    catalyst_direction = excluded.catalyst_direction,
+                    catalyst_detail = excluded.catalyst_detail,
+                    pre_market_gap_pct = excluded.pre_market_gap_pct,
+                    pre_market_relative_volume = excluded.pre_market_relative_volume,
+                    pre_market_dollar_volume = excluded.pre_market_dollar_volume,
+                    attention = excluded.attention,
+                    positioning_pressure = excluded.positioning_pressure,
+                    crowd_trap_risk = excluded.crowd_trap_risk,
+                    short_interest_pct_float = excluded.short_interest_pct_float,
+                    days_to_cover = excluded.days_to_cover,
+                    suggested_setup = excluded.suggested_setup,
+                    setup_score = excluded.setup_score,
+                    short_tradable = excluded.short_tradable,
+                    as_of_timestamp = excluded.as_of_timestamp
+                """,
+                rows,
+            )
+            connection.commit()

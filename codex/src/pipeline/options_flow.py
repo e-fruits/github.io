@@ -17,7 +17,7 @@ from src.utils.timestamps import ensure_utc_timestamp
 LOGGER = logging.getLogger(__name__)
 
 
-@dataclass(slots=True)
+@dataclass
 class OptionContractSnapshot:
     trade_date: date
     ticker: str
