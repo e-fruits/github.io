@@ -1,0 +1,54 @@
+database:
+  path: "data/processed/catalyst_crowding.sqlite"
+
+pipeline:
+  cache_dir: "data/raw"
+  log_level: "INFO"
+  start_date: "2020-01-01"
+
+price_volume:
+  adjusted: true
+  include_premarket: true
+  rolling_window_days: 20
+  chunk_size: 250
+
+catalysts:
+  sources:
+    - finnhub
+    - yahoo_finance
+  include_earnings: true
+  include_analyst_actions: true
+  include_fda_events: true
+  include_company_news: true
+  chunk_size: 250
+
+universe:
+  min_market_cap: 300000000
+  max_market_cap: 5000000000
+  min_price: 5.0
+  min_avg_volume_20d: 500000
+  allowed_exchanges:
+    - NYSE
+    - NASDAQ
+  include_delisted: true
+
+providers:
+  polygon:
+    api_key: ""
+    base_url: "https://api.polygon.io"
+  schwab:
+    app_key: ""
+    app_secret: ""
+  finnhub:
+    api_key: ""
+    base_url: "https://finnhub.io/api/v1"
+  yahoo_finance:
+    enabled: true
+  reddit:
+    client_id: ""
+    client_secret: ""
+    user_agent: "catalyst-crowding-research"
+
+compliance:
+  blocklist_path: "config/blocked_tickers.yaml"
+  fail_on_blocklist_conflicts: true

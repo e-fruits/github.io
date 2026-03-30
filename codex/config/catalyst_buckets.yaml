@@ -1,0 +1,33 @@
+earnings:
+  description: "Quarterly results, guidance, or outlook changes"
+  aliases:
+    - earnings
+    - earnings beat
+    - earnings miss
+    - guidance
+    - outlook
+
+analyst:
+  description: "Sell-side rating changes, target changes, initiations"
+  aliases:
+    - upgrade
+    - downgrade
+    - price target
+    - initiation
+
+regulatory:
+  description: "FDA, litigation, exchange, or government decision"
+  aliases:
+    - fda
+    - approval
+    - rejection
+    - regulatory
+
+news:
+  description: "Material company-specific news"
+  aliases:
+    - contract
+    - financing
+    - acquisition
+    - partnership
+

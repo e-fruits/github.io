@@ -1,0 +1,2 @@
+"""Squeeze risk placeholder."""
+

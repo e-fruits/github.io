@@ -1,0 +1,2 @@
+"""Short interest ingestion placeholder."""
+

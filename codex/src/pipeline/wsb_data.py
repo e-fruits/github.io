@@ -1,0 +1,2 @@
+"""Reddit / WSB ingestion placeholder."""
+
