@@ -7,14 +7,17 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Protocol
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from src.utils.config import AppSettings, load_settings
 from src.utils.db import DatabaseManager
+from src.utils.http import HttpRequestError, JsonHttpClient
 from src.utils.timestamps import ensure_utc_timestamp
 
 LOGGER = logging.getLogger(__name__)
+EASTERN_TZ = ZoneInfo("America/New_York")
 
 
 @dataclass
@@ -60,7 +63,7 @@ class HistoricalPriceClient(Protocol):
 
 
 class StubHistoricalPriceClient:
-    """Synthetic client to keep the loader runnable before real Polygon integration."""
+    """Synthetic client to keep the loader runnable before real Massive integration."""
 
     def get_daily_bars(
         self,
@@ -111,6 +114,105 @@ class StubHistoricalPriceClient:
             dollar_volume=round(volume * base, 2),
             as_of_timestamp=datetime.combine(trade_date, time(hour=13, minute=25), tzinfo=timezone.utc),
         )
+
+
+class PolygonHistoricalPriceClient:
+    """Massive-backed OHLCV and premarket client."""
+
+    def __init__(self, settings: AppSettings) -> None:
+        api_key = settings.providers.polygon.api_key
+        if not api_key:
+            raise ValueError("Massive API key is required for the live price client")
+        self.settings = settings
+        self.http = JsonHttpClient(
+            base_url=settings.providers.polygon.base_url,
+            cache_dir=settings.pipeline.cache_dir,
+            timeout_seconds=settings.pipeline.request_timeout_seconds,
+            auth_query_param="apiKey",
+            auth_token=api_key,
+        )
+
+    def get_daily_bars(
+        self,
+        ticker: str,
+        start_date: date,
+        end_date: date,
+        adjusted: bool = True,
+    ) -> Iterable[DailyBar]:
+        try:
+            payload = self.http.get_json(
+                f"/v2/aggs/ticker/{ticker}/range/1/day/{start_date.isoformat()}/{end_date.isoformat()}",
+                params={"adjusted": str(adjusted).lower(), "sort": "asc", "limit": 5000},
+                cache_namespace=f"polygon/daily_prices/{ticker}",
+            )
+        except HttpRequestError as exc:
+            LOGGER.warning("Massive daily bars failed for %s: %s", ticker, exc)
+            return []
+
+        rows = payload.get("results", [])
+        if not isinstance(rows, list):
+            return []
+
+        results: list[DailyBar] = []
+        for row in rows:
+            if not isinstance(row, dict) or row.get("o") is None:
+                continue
+            trade_date = self._timestamp_to_date(row.get("t"))
+            if trade_date is None:
+                continue
+            results.append(
+                DailyBar(
+                    trade_date=trade_date,
+                    ticker=ticker,
+                    open=float(row["o"]),
+                    high=float(row["h"]),
+                    low=float(row["l"]),
+                    close=float(row["c"]),
+                    volume=float(row.get("v", 0.0)),
+                    vwap=None if row.get("vw") is None else float(row["vw"]),
+                    as_of_timestamp=datetime.combine(trade_date, time(hour=20, minute=0), tzinfo=timezone.utc),
+                )
+            )
+        return results
+
+    def get_premarket_snapshot(self, ticker: str, trade_date: date) -> PremarketSnapshot | None:
+        session_start = datetime.combine(trade_date, time(hour=4, minute=0), tzinfo=EASTERN_TZ)
+        session_end = datetime.combine(trade_date, time(hour=9, minute=29), tzinfo=EASTERN_TZ)
+        start_ms = int(session_start.astimezone(timezone.utc).timestamp() * 1000)
+        end_ms = int(session_end.astimezone(timezone.utc).timestamp() * 1000)
+        try:
+            payload = self.http.get_json(
+                f"/v2/aggs/ticker/{ticker}/range/1/minute/{start_ms}/{end_ms}",
+                params={"adjusted": str(self.settings.price_volume.adjusted).lower(), "sort": "asc", "limit": 50000},
+                cache_namespace=f"polygon/premarket/{ticker}",
+            )
+        except HttpRequestError as exc:
+            LOGGER.warning("Massive premarket bars failed for %s on %s: %s", ticker, trade_date, exc)
+            return None
+
+        rows = [row for row in payload.get("results", []) if isinstance(row, dict)]
+        if not rows:
+            return None
+
+        high = max(float(row["h"]) for row in rows if row.get("h") is not None)
+        low = min(float(row["l"]) for row in rows if row.get("l") is not None)
+        volume = sum(float(row.get("v", 0.0)) for row in rows)
+        dollar_volume = sum(float(row.get("vw", row.get("c", 0.0))) * float(row.get("v", 0.0)) for row in rows)
+        return PremarketSnapshot(
+            trade_date=trade_date,
+            ticker=ticker,
+            high=high,
+            low=low,
+            volume=volume,
+            dollar_volume=dollar_volume,
+            as_of_timestamp=session_end.astimezone(timezone.utc),
+        )
+
+    @staticmethod
+    def _timestamp_to_date(timestamp_ms: object) -> date | None:
+        if timestamp_ms in (None, ""):
+            return None
+        return datetime.fromtimestamp(float(timestamp_ms) / 1000.0, tz=timezone.utc).date()
 
 
 class PriceVolumeLoader:
@@ -238,5 +340,13 @@ def load_daily_prices_from_config(
     settings = load_settings(settings_path)
     db = DatabaseManager(settings.database.path)
     db.initialize()
-    loader = PriceVolumeLoader(settings=settings, db=db, client=StubHistoricalPriceClient())
+    client: HistoricalPriceClient
+    if settings.providers.polygon.api_key:
+        client = PolygonHistoricalPriceClient(settings)
+    else:
+        if not settings.pipeline.use_stub_fallback:
+            raise ValueError("Massive API key is required when stub fallback is disabled")
+        LOGGER.warning("Massive API key not configured; falling back to stub price client")
+        client = StubHistoricalPriceClient()
+    loader = PriceVolumeLoader(settings=settings, db=db, client=client)
     return loader.load_range(start_date=start_date, end_date=end_date, tickers=tickers)

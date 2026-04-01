@@ -34,7 +34,7 @@ python scripts/run_pipeline.py --init-db
 python scripts/run_pipeline.py --build-universe --start-date 2020-01-01 --end-date 2020-01-10
 ```
 
-The default universe builder uses a stubbed reference-data client. Replace it with a real Polygon client before expecting production ingestion.
+The default universe builder uses a stubbed reference-data client. Replace it with a real Massive.com (formerly Polygon.io) client before expecting production ingestion.
 
 ## Point-in-Time Principles
 
@@ -46,4 +46,3 @@ The default universe builder uses a stubbed reference-data client. Replace it wi
 ## Compliance
 
 Tickers and sectors can be excluded through [config/blocked_tickers.yaml](/Users/eric/git_repo/codex/config/blocked_tickers.yaml). This blocklist is loaded at runtime and applied during universe construction before records are stored.
-
