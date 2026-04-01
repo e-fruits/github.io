@@ -10,6 +10,7 @@ from typing import Iterable, Protocol
 
 from src.utils.config import AppSettings, load_settings
 from src.utils.db import DatabaseManager
+from src.utils.http import HttpRequestError, JsonHttpClient
 from src.utils.timestamps import ensure_utc_timestamp
 
 LOGGER = logging.getLogger(__name__)
@@ -93,6 +94,184 @@ class StubCatalystClient:
                         estimate_value=0.31,
                     )
             current += timedelta(days=1)
+
+
+class FinnhubCatalystClient:
+    """Finnhub-backed catalyst client for earnings, analyst actions, and news."""
+
+    POSITIVE_NEWS_KEYWORDS = {"beat", "approval", "approves", "wins", "partnership", "upgrade", "raises", "launches"}
+    NEGATIVE_NEWS_KEYWORDS = {"miss", "downgrade", "cuts", "delay", "halts", "lawsuit", "offering", "dilution"}
+    REGULATORY_KEYWORDS = {"fda", "approval", "clearance", "complete response", "clinical", "phase"}
+
+    def __init__(self, settings: AppSettings) -> None:
+        api_key = settings.providers.finnhub.api_key
+        if not api_key:
+            raise ValueError("Finnhub API key is required for the live catalyst client")
+        self.http = JsonHttpClient(
+            base_url=settings.providers.finnhub.base_url,
+            cache_dir=settings.pipeline.cache_dir,
+            timeout_seconds=settings.pipeline.request_timeout_seconds,
+            auth_query_param="token",
+            auth_token=api_key,
+        )
+
+    def get_events(self, ticker: str, start_date: date, end_date: date) -> Iterable[CatalystEvent]:
+        yield from self._earnings_events(ticker, start_date, end_date)
+        yield from self._analyst_events(ticker, start_date, end_date)
+        yield from self._news_events(ticker, start_date, end_date)
+
+    def _earnings_events(self, ticker: str, start_date: date, end_date: date) -> Iterable[CatalystEvent]:
+        for chunk_start, chunk_end in self._chunk_dates(start_date, end_date, window_days=90):
+            try:
+                payload = self.http.get_json(
+                    "/calendar/earnings",
+                    params={"from": chunk_start.isoformat(), "to": chunk_end.isoformat(), "symbol": ticker},
+                    cache_namespace=f"finnhub/earnings/{ticker}",
+                )
+            except HttpRequestError as exc:
+                LOGGER.warning("Finnhub earnings calendar failed for %s: %s", ticker, exc)
+                return
+
+            events = payload.get("earningsCalendar", [])
+            if not isinstance(events, list):
+                continue
+            for row in events:
+                if not isinstance(row, dict) or not row.get("date"):
+                    continue
+                trade_date = date.fromisoformat(str(row["date"]))
+                as_of_timestamp = self._event_timestamp(trade_date, row.get("hour"), default_hour=12, default_minute=0)
+                yield CatalystEvent(
+                    trade_date=trade_date,
+                    ticker=ticker,
+                    event_type="earnings",
+                    detail="Quarterly earnings report",
+                    source="finnhub",
+                    source_timestamp=as_of_timestamp,
+                    as_of_timestamp=as_of_timestamp,
+                    direction_hint=None,
+                    actual_value=self._to_float(row.get("epsActual")),
+                    estimate_value=self._to_float(row.get("epsEstimate")),
+                )
+
+    def _analyst_events(self, ticker: str, start_date: date, end_date: date) -> Iterable[CatalystEvent]:
+        for chunk_start, chunk_end in self._chunk_dates(start_date, end_date, window_days=180):
+            try:
+                rows = self.http.get_json(
+                    "/stock/upgrade-downgrade",
+                    params={"symbol": ticker, "from": chunk_start.isoformat(), "to": chunk_end.isoformat()},
+                    cache_namespace=f"finnhub/analyst/{ticker}",
+                )
+            except HttpRequestError as exc:
+                LOGGER.warning("Finnhub analyst actions failed for %s: %s", ticker, exc)
+                return
+
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                grade_time = self._parse_timestamp(row.get("gradeTime"))
+                if grade_time is None:
+                    continue
+                action = str(row.get("action") or "").lower()
+                to_grade = str(row.get("toGrade") or row.get("to_grade") or "").strip()
+                from_grade = str(row.get("fromGrade") or row.get("from_grade") or "").strip()
+                detail = " ".join(part for part in [action.title() if action else "Analyst action", f"{from_grade}->{to_grade}" if from_grade or to_grade else ""] if part).strip()
+                yield CatalystEvent(
+                    trade_date=grade_time.date(),
+                    ticker=ticker,
+                    event_type="analyst_upgrade" if "up" in action else "analyst_downgrade" if "down" in action else "analyst_action",
+                    detail=detail or "Analyst action",
+                    source="finnhub",
+                    source_timestamp=grade_time,
+                    as_of_timestamp=grade_time,
+                    direction_hint="positive" if "up" in action else "negative" if "down" in action else None,
+                    analyst_firm=str(row.get("company") or row.get("firm") or "") or None,
+                )
+
+    def _news_events(self, ticker: str, start_date: date, end_date: date) -> Iterable[CatalystEvent]:
+        for chunk_start, chunk_end in self._chunk_dates(start_date, end_date, window_days=30):
+            try:
+                rows = self.http.get_json(
+                    "/company-news",
+                    params={"symbol": ticker, "from": chunk_start.isoformat(), "to": chunk_end.isoformat()},
+                    cache_namespace=f"finnhub/company_news/{ticker}",
+                )
+            except HttpRequestError as exc:
+                LOGGER.warning("Finnhub company news failed for %s: %s", ticker, exc)
+                return
+
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                timestamp = self._parse_timestamp(row.get("datetime"))
+                if timestamp is None:
+                    continue
+                headline = str(row.get("headline") or "").strip()
+                summary = str(row.get("summary") or "").strip()
+                combined_text = f"{headline} {summary}".lower()
+                is_regulatory = any(keyword in combined_text for keyword in self.REGULATORY_KEYWORDS)
+                yield CatalystEvent(
+                    trade_date=timestamp.date(),
+                    ticker=ticker,
+                    event_type="fda_decision" if is_regulatory else "company_news",
+                    detail=headline or "Company news",
+                    source=str(row.get("source") or "finnhub"),
+                    source_timestamp=timestamp,
+                    as_of_timestamp=timestamp,
+                    direction_hint=self._infer_news_direction(combined_text),
+                )
+
+    def _infer_news_direction(self, text: str) -> str:
+        positive_hits = sum(1 for keyword in self.POSITIVE_NEWS_KEYWORDS if keyword in text)
+        negative_hits = sum(1 for keyword in self.NEGATIVE_NEWS_KEYWORDS if keyword in text)
+        if positive_hits > negative_hits:
+            return "positive"
+        if negative_hits > positive_hits:
+            return "negative"
+        return "ambiguous"
+
+    @staticmethod
+    def _chunk_dates(start_date: date, end_date: date, *, window_days: int) -> Iterable[tuple[date, date]]:
+        current = start_date
+        while current <= end_date:
+            chunk_end = min(current + timedelta(days=window_days - 1), end_date)
+            yield current, chunk_end
+            current = chunk_end + timedelta(days=1)
+
+    @staticmethod
+    def _event_timestamp(trade_date: date, hour_hint: object, *, default_hour: int, default_minute: int) -> datetime:
+        hint = str(hour_hint or "").lower()
+        if hint == "bmo":
+            local_time = time(hour=8, minute=0)
+        elif hint == "amc":
+            local_time = time(hour=16, minute=5)
+        else:
+            local_time = time(hour=default_hour, minute=default_minute)
+        return datetime.combine(trade_date, local_time, tzinfo=timezone.utc)
+
+    @staticmethod
+    def _parse_timestamp(value: object) -> datetime | None:
+        if value in (None, ""):
+            return None
+        if isinstance(value, (int, float)):
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+    @staticmethod
+    def _to_float(value: object) -> float | None:
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
 
 class CatalystLoader:
@@ -195,5 +374,13 @@ def load_catalysts_from_config(
     settings = load_settings(settings_path)
     db = DatabaseManager(settings.database.path)
     db.initialize()
-    loader = CatalystLoader(settings=settings, db=db, client=StubCatalystClient())
+    client: CatalystClient
+    if settings.providers.finnhub.api_key:
+        client = FinnhubCatalystClient(settings)
+    else:
+        if not settings.pipeline.use_stub_fallback:
+            raise ValueError("Finnhub API key is required when stub fallback is disabled")
+        LOGGER.warning("Finnhub API key not configured; falling back to stub catalyst client")
+        client = StubCatalystClient()
+    loader = CatalystLoader(settings=settings, db=db, client=client)
     return loader.load_range(start_date=start_date, end_date=end_date, tickers=tickers)

@@ -10,9 +10,11 @@ from pathlib import Path
 from typing import Iterable, Protocol
 
 import pandas as pd
+import requests
 
 from src.utils.config import AppSettings, load_settings
 from src.utils.db import DatabaseManager
+from src.utils.http import HttpRequestError, JsonHttpClient
 from src.utils.timestamps import ensure_utc_timestamp
 
 LOGGER = logging.getLogger(__name__)
@@ -108,6 +110,155 @@ class StubRedditMessageClient:
             current += timedelta(days=1)
 
 
+class RealApeWisdomClient:
+    def __init__(self, settings: AppSettings) -> None:
+        self.http = JsonHttpClient(
+            base_url=settings.providers.apewisdom.base_url,
+            cache_dir=settings.pipeline.cache_dir,
+            timeout_seconds=settings.pipeline.request_timeout_seconds,
+        )
+
+    def get_daily_top_mentions(self, trade_date: date, top_n: int) -> Iterable[ApeWisdomMention]:
+        payload = self.http.get_json(
+            f"/filter/all-stocks/page/1",
+            cache_namespace=f"apewisdom/daily/{trade_date.isoformat()}",
+        )
+        rows = payload.get("results", payload.get("data", []))
+        if not isinstance(rows, list):
+            return []
+
+        as_of_timestamp = datetime.combine(trade_date, time(hour=13, minute=0), tzinfo=timezone.utc)
+        mentions: list[ApeWisdomMention] = []
+        for rank_index, row in enumerate(rows[:top_n], start=1):
+            if not isinstance(row, dict) or not row.get("ticker"):
+                continue
+            mentions.append(
+                ApeWisdomMention(
+                    trade_date=trade_date,
+                    ticker=str(row["ticker"]).upper(),
+                    mention_count=float(row.get("mentions") or row.get("mention_count") or 0.0),
+                    upvotes=float(row.get("upvotes") or row.get("total_upvotes") or 0.0),
+                    rank=float(row.get("rank") or rank_index),
+                    rank_change_24h=self._to_float(row.get("rank_24h_ago") or row.get("rank_change_24h")),
+                    as_of_timestamp=as_of_timestamp,
+                )
+            )
+        return mentions
+
+    @staticmethod
+    def _to_float(value: object) -> float | None:
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+
+class RedditOauthClient:
+    SEARCH_LIMIT = 100
+
+    def __init__(self, settings: AppSettings) -> None:
+        credentials = settings.providers.reddit
+        if not credentials.client_id or not credentials.client_secret:
+            raise ValueError("Reddit client_id/client_secret are required for the live Reddit client")
+        self.settings = settings
+        self.credentials = credentials
+        self.cache_dir = settings.pipeline.cache_dir
+        self.timeout_seconds = settings.pipeline.request_timeout_seconds
+        self._token: str | None = None
+        self._session = requests.Session()
+        self._session.headers.update({"User-Agent": credentials.user_agent})
+
+    def get_messages(self, start_date: date, end_date: date, subreddit: str) -> Iterable[RedditMessage]:
+        trade_dates = self._trading_dates(start_date, end_date)
+        if not trade_dates:
+            return []
+
+        token = self._get_token()
+        session = requests.Session()
+        session.headers.update(
+            {
+                "Authorization": f"Bearer {token}",
+                "User-Agent": self.credentials.user_agent,
+            }
+        )
+
+        messages: list[RedditMessage] = []
+        for trade_date in trade_dates:
+            query = f"timestamp:{int(datetime.combine(trade_date, time.min, tzinfo=timezone.utc).timestamp())}..{int(datetime.combine(trade_date, time.max, tzinfo=timezone.utc).timestamp())}"
+            try:
+                response = session.get(
+                    f"https://oauth.reddit.com/r/{subreddit}/search.json",
+                    params={
+                        "q": query,
+                        "restrict_sr": "on",
+                        "sort": "new",
+                        "syntax": "cloudsearch",
+                        "limit": self.SEARCH_LIMIT,
+                        "t": "all",
+                    },
+                    timeout=self.timeout_seconds,
+                )
+                response.raise_for_status()
+            except requests.RequestException as exc:
+                LOGGER.warning("Reddit search failed for %s on %s: %s", subreddit, trade_date, exc)
+                continue
+
+            payload = response.json()
+            children = payload.get("data", {}).get("children", [])
+            for child in children:
+                post_data = child.get("data", {})
+                created_ts = post_data.get("created_utc")
+                body = post_data.get("selftext") or post_data.get("title") or ""
+                created_at = None if created_ts is None else datetime.fromtimestamp(float(created_ts), tz=timezone.utc)
+                if created_at is None or created_at.date() != trade_date:
+                    continue
+                ticker = WsbDataLoader._extract_primary_ticker(str(body))
+                if ticker is None:
+                    continue
+                messages.append(
+                    RedditMessage(
+                        created_at=created_at,
+                        ticker=ticker,
+                        text=str(body),
+                        score=float(post_data.get("score") or 0.0),
+                        as_of_timestamp=created_at + timedelta(minutes=1),
+                    )
+                )
+        return messages
+
+    def _get_token(self) -> str:
+        if self._token is not None:
+            return self._token
+        try:
+            response = self._session.post(
+                "https://www.reddit.com/api/v1/access_token",
+                auth=(self.credentials.client_id, self.credentials.client_secret),
+                data={"grant_type": "client_credentials"},
+                timeout=self.timeout_seconds,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Unable to authenticate with Reddit: {exc}") from exc
+        payload = response.json()
+        token = payload.get("access_token")
+        if not token:
+            raise RuntimeError("Reddit authentication returned no access token")
+        self._token = str(token)
+        return self._token
+
+    @staticmethod
+    def _trading_dates(start_date: date, end_date: date) -> list[date]:
+        dates: list[date] = []
+        current = start_date
+        while current <= end_date:
+            if current.weekday() < 5:
+                dates.append(current)
+            current += timedelta(days=1)
+        return dates
+
+
 class SimpleSentimentAnalyzer:
     """Use optional FinBERT/VADER when installed, otherwise fall back to keyword scoring."""
 
@@ -176,8 +327,8 @@ class WsbDataLoader:
     ) -> None:
         self.settings = settings
         self.db = db
-        self.apewisdom_client = apewisdom_client or StubApeWisdomClient()
-        self.reddit_client = reddit_client or StubRedditMessageClient()
+        self.apewisdom_client = apewisdom_client or self._default_apewisdom_client(settings)
+        self.reddit_client = reddit_client or self._default_reddit_client(settings)
         self.sentiment_analyzer = sentiment_analyzer or SimpleSentimentAnalyzer(
             preferred_model=settings.wsb.sentiment_model,
             fallback_model=settings.wsb.fallback_sentiment_model,
@@ -352,6 +503,32 @@ class WsbDataLoader:
                 }
             )
         return result
+
+    @staticmethod
+    def _default_apewisdom_client(settings: AppSettings) -> ApeWisdomClient:
+        try:
+            return RealApeWisdomClient(settings)
+        except Exception as exc:
+            if not settings.pipeline.use_stub_fallback:
+                raise
+            LOGGER.warning("Falling back to stub ApeWisdom client: %s", exc)
+            return StubApeWisdomClient()
+
+    @staticmethod
+    def _default_reddit_client(settings: AppSettings) -> RedditMessageClient:
+        credentials = settings.providers.reddit
+        if credentials.client_id and credentials.client_secret:
+            try:
+                return RedditOauthClient(settings)
+            except Exception as exc:
+                if not settings.pipeline.use_stub_fallback:
+                    raise
+                LOGGER.warning("Falling back to stub Reddit client: %s", exc)
+        elif not settings.pipeline.use_stub_fallback:
+            raise ValueError("Reddit credentials are required when stub fallback is disabled")
+        else:
+            LOGGER.warning("Reddit credentials not configured; falling back to stub Reddit client")
+        return StubRedditMessageClient()
 
     @staticmethod
     def _dominant_label(scores: list[float]) -> str:

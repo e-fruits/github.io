@@ -98,7 +98,7 @@ universe:
 providers:
   polygon:
     api_key: ""
-    base_url: "https://api.polygon.io"
+    base_url: "https://api.massive.com"
   schwab:
     app_key: ""
     app_secret: ""

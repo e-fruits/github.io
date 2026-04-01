@@ -12,6 +12,7 @@ import pandas as pd
 
 from src.utils.config import AppSettings, load_settings
 from src.utils.db import DatabaseManager
+from src.utils.http import HttpRequestError, JsonHttpClient
 from src.utils.timestamps import ensure_utc_timestamp
 
 LOGGER = logging.getLogger(__name__)
@@ -59,6 +60,82 @@ class StubOptionsFlowClient:
                 as_of_timestamp=base_time,
             ),
         ]
+
+
+class PolygonOptionsFlowClient:
+    """Massive-backed options-flow client using contract reference + daily aggregates."""
+
+    def __init__(self, settings: AppSettings) -> None:
+        api_key = settings.providers.polygon.api_key
+        if not api_key:
+            raise ValueError("Massive API key is required for the live options client")
+        self.http = JsonHttpClient(
+            base_url=settings.providers.polygon.base_url,
+            cache_dir=settings.pipeline.cache_dir,
+            timeout_seconds=settings.pipeline.request_timeout_seconds,
+            auth_query_param="apiKey",
+            auth_token=api_key,
+        )
+
+    def get_chain_snapshot(self, ticker: str, trade_date: date) -> Iterable[OptionContractSnapshot]:
+        contracts = self.http.get_paginated_results(
+            "/v3/reference/options/contracts",
+            params={
+                "underlying_ticker": ticker,
+                "as_of": trade_date.isoformat(),
+                "expired": "true",
+                "limit": 1000,
+            },
+            cache_namespace=f"polygon/options_contracts/{ticker}/{trade_date.isoformat()}",
+        )
+        snapshots: list[OptionContractSnapshot] = []
+        for contract in contracts:
+            contract_ticker = contract.get("ticker")
+            contract_type = str(contract.get("contract_type") or "").lower()
+            if not contract_ticker or contract_type not in {"call", "put"}:
+                continue
+
+            aggregate = self._fetch_contract_aggregate(str(contract_ticker), trade_date)
+            if aggregate is None:
+                continue
+
+            snapshots.append(
+                OptionContractSnapshot(
+                    trade_date=trade_date,
+                    ticker=ticker,
+                    option_type=contract_type,
+                    volume=float(aggregate.get("v", 0.0)),
+                    open_interest=self._to_float(contract.get("open_interest")) or 0.0,
+                    small_lot_volume=None,
+                    as_of_timestamp=datetime.combine(trade_date, time(hour=21, minute=0), tzinfo=timezone.utc),
+                )
+            )
+        return snapshots
+
+    def _fetch_contract_aggregate(self, contract_ticker: str, trade_date: date) -> dict[str, object] | None:
+        try:
+            payload = self.http.get_json(
+                f"/v2/aggs/ticker/{contract_ticker}/range/1/day/{trade_date.isoformat()}/{trade_date.isoformat()}",
+                params={"adjusted": "true", "sort": "asc", "limit": 10},
+                cache_namespace=f"polygon/options_aggs/{contract_ticker}",
+            )
+        except HttpRequestError as exc:
+            LOGGER.warning("Massive options aggregate failed for %s: %s", contract_ticker, exc)
+            return None
+        rows = payload.get("results", [])
+        if not isinstance(rows, list) or not rows:
+            return None
+        row = rows[0]
+        return row if isinstance(row, dict) else None
+
+    @staticmethod
+    def _to_float(value: object) -> float | None:
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
 
 class OptionsFlowLoader:
@@ -181,5 +258,13 @@ def load_options_flow_from_config(
     settings = load_settings(settings_path)
     db = DatabaseManager(settings.database.path)
     db.initialize()
-    loader = OptionsFlowLoader(settings=settings, db=db, client=StubOptionsFlowClient())
+    client: OptionsFlowClient
+    if settings.providers.polygon.api_key:
+        client = PolygonOptionsFlowClient(settings)
+    else:
+        if not settings.pipeline.use_stub_fallback:
+            raise ValueError("Massive API key is required when stub fallback is disabled")
+        LOGGER.warning("Massive API key not configured; falling back to stub options client")
+        client = StubOptionsFlowClient()
+    loader = OptionsFlowLoader(settings=settings, db=db, client=client)
     return loader.load_range(start_date=start_date, end_date=end_date, tickers=tickers)
