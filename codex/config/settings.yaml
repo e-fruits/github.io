@@ -97,13 +97,13 @@ universe:
 
 providers:
   polygon:
-    api_key: ""
+    api_key: "0HbRgMAhDVTcN0LTL2iZavMH206G1n44"
     base_url: "https://api.massive.com"
   schwab:
     app_key: ""
     app_secret: ""
   finnhub:
-    api_key: ""
+    api_key: "d766kgpr01qm4b7t5ig0d766kgpr01qm4b7t5igg"
     base_url: "https://finnhub.io/api/v1"
   yahoo_finance:
     enabled: true
