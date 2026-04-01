@@ -5,6 +5,8 @@ pipeline:
   cache_dir: "data/raw"
   log_level: "INFO"
   start_date: "2020-01-01"
+  request_timeout_seconds: 30
+  use_stub_fallback: true
 
 price_volume:
   adjusted: true
@@ -25,13 +27,11 @@ catalysts:
 wsb:
   sources:
     - apewisdom
-    - praw
     - kaggle
   rolling_window_days: 20
   apewisdom_top_n: 50
   sentiment_model: "finbert"
   fallback_sentiment_model: "vader"
-  subreddit: "wallstreetbets"
   kaggle_dataset_path: "data/raw/kaggle/wsb_historical.csv"
 
 options_flow:
@@ -109,10 +109,6 @@ providers:
     enabled: true
   apewisdom:
     base_url: "https://apewisdom.io/api/v1.0"
-  reddit:
-    client_id: ""
-    client_secret: ""
-    user_agent: "catalyst-crowding-research"
   finra:
     base_url: "https://api.finra.org"
 
