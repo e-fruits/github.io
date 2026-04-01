@@ -1,4 +1,4 @@
-"""WSB / Reddit mention ingestion with ApeWisdom, PRAW, and Kaggle paths."""
+"""WSB mention ingestion with ApeWisdom and historical dataset paths."""
 
 from __future__ import annotations
 
@@ -10,11 +10,10 @@ from pathlib import Path
 from typing import Iterable, Protocol
 
 import pandas as pd
-import requests
 
 from src.utils.config import AppSettings, load_settings
 from src.utils.db import DatabaseManager
-from src.utils.http import HttpRequestError, JsonHttpClient
+from src.utils.http import JsonHttpClient
 from src.utils.timestamps import ensure_utc_timestamp
 
 LOGGER = logging.getLogger(__name__)
@@ -33,23 +32,9 @@ class ApeWisdomMention:
     as_of_timestamp: datetime
 
 
-@dataclass
-class RedditMessage:
-    created_at: datetime
-    ticker: str
-    text: str
-    score: float
-    as_of_timestamp: datetime
-
-
 class ApeWisdomClient(Protocol):
     def get_daily_top_mentions(self, trade_date: date, top_n: int) -> Iterable[ApeWisdomMention]:
         """Return daily top-mentioned tickers from ApeWisdom."""
-
-
-class RedditMessageClient(Protocol):
-    def get_messages(self, start_date: date, end_date: date, subreddit: str) -> Iterable[RedditMessage]:
-        """Return WSB posts/comments with timestamps and message text."""
 
 
 class StubApeWisdomClient:
@@ -77,37 +62,6 @@ class StubApeWisdomClient:
                 as_of_timestamp=base_timestamp,
             ),
         ]
-
-
-class StubRedditMessageClient:
-    def get_messages(self, start_date: date, end_date: date, subreddit: str) -> Iterable[RedditMessage]:
-        del subreddit
-        current = start_date
-        while current <= end_date:
-            if current.weekday() < 5:
-                ts = datetime.combine(current, time(hour=22, minute=0), tzinfo=timezone.utc)
-                yield RedditMessage(
-                    created_at=ts,
-                    ticker="ABCD",
-                    text="ABCD looks bullish, huge beat, strong breakout and squeeze setup",
-                    score=float(250 + current.day * 3),
-                    as_of_timestamp=ts + timedelta(minutes=5),
-                )
-                yield RedditMessage(
-                    created_at=ts + timedelta(minutes=10),
-                    ticker="ABCD",
-                    text="ABCD still bullish and ripping",
-                    score=float(180 + current.day * 2),
-                    as_of_timestamp=ts + timedelta(minutes=15),
-                )
-                yield RedditMessage(
-                    created_at=ts + timedelta(minutes=20),
-                    ticker="EFGH",
-                    text="EFGH looks weak and bearish after dilution",
-                    score=float(90 + current.day),
-                    as_of_timestamp=ts + timedelta(minutes=25),
-                )
-            current += timedelta(days=1)
 
 
 class RealApeWisdomClient:
@@ -153,110 +107,6 @@ class RealApeWisdomClient:
             return float(value)
         except (TypeError, ValueError):
             return None
-
-
-class RedditOauthClient:
-    SEARCH_LIMIT = 100
-
-    def __init__(self, settings: AppSettings) -> None:
-        credentials = settings.providers.reddit
-        if not credentials.client_id or not credentials.client_secret:
-            raise ValueError("Reddit client_id/client_secret are required for the live Reddit client")
-        self.settings = settings
-        self.credentials = credentials
-        self.cache_dir = settings.pipeline.cache_dir
-        self.timeout_seconds = settings.pipeline.request_timeout_seconds
-        self._token: str | None = None
-        self._session = requests.Session()
-        self._session.headers.update({"User-Agent": credentials.user_agent})
-
-    def get_messages(self, start_date: date, end_date: date, subreddit: str) -> Iterable[RedditMessage]:
-        trade_dates = self._trading_dates(start_date, end_date)
-        if not trade_dates:
-            return []
-
-        token = self._get_token()
-        session = requests.Session()
-        session.headers.update(
-            {
-                "Authorization": f"Bearer {token}",
-                "User-Agent": self.credentials.user_agent,
-            }
-        )
-
-        messages: list[RedditMessage] = []
-        for trade_date in trade_dates:
-            query = f"timestamp:{int(datetime.combine(trade_date, time.min, tzinfo=timezone.utc).timestamp())}..{int(datetime.combine(trade_date, time.max, tzinfo=timezone.utc).timestamp())}"
-            try:
-                response = session.get(
-                    f"https://oauth.reddit.com/r/{subreddit}/search.json",
-                    params={
-                        "q": query,
-                        "restrict_sr": "on",
-                        "sort": "new",
-                        "syntax": "cloudsearch",
-                        "limit": self.SEARCH_LIMIT,
-                        "t": "all",
-                    },
-                    timeout=self.timeout_seconds,
-                )
-                response.raise_for_status()
-            except requests.RequestException as exc:
-                LOGGER.warning("Reddit search failed for %s on %s: %s", subreddit, trade_date, exc)
-                continue
-
-            payload = response.json()
-            children = payload.get("data", {}).get("children", [])
-            for child in children:
-                post_data = child.get("data", {})
-                created_ts = post_data.get("created_utc")
-                body = post_data.get("selftext") or post_data.get("title") or ""
-                created_at = None if created_ts is None else datetime.fromtimestamp(float(created_ts), tz=timezone.utc)
-                if created_at is None or created_at.date() != trade_date:
-                    continue
-                ticker = WsbDataLoader._extract_primary_ticker(str(body))
-                if ticker is None:
-                    continue
-                messages.append(
-                    RedditMessage(
-                        created_at=created_at,
-                        ticker=ticker,
-                        text=str(body),
-                        score=float(post_data.get("score") or 0.0),
-                        as_of_timestamp=created_at + timedelta(minutes=1),
-                    )
-                )
-        return messages
-
-    def _get_token(self) -> str:
-        if self._token is not None:
-            return self._token
-        try:
-            response = self._session.post(
-                "https://www.reddit.com/api/v1/access_token",
-                auth=(self.credentials.client_id, self.credentials.client_secret),
-                data={"grant_type": "client_credentials"},
-                timeout=self.timeout_seconds,
-            )
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            raise RuntimeError(f"Unable to authenticate with Reddit: {exc}") from exc
-        payload = response.json()
-        token = payload.get("access_token")
-        if not token:
-            raise RuntimeError("Reddit authentication returned no access token")
-        self._token = str(token)
-        return self._token
-
-    @staticmethod
-    def _trading_dates(start_date: date, end_date: date) -> list[date]:
-        dates: list[date] = []
-        current = start_date
-        while current <= end_date:
-            if current.weekday() < 5:
-                dates.append(current)
-            current += timedelta(days=1)
-        return dates
 
 
 class SimpleSentimentAnalyzer:
@@ -322,13 +172,11 @@ class WsbDataLoader:
         settings: AppSettings,
         db: DatabaseManager,
         apewisdom_client: ApeWisdomClient | None = None,
-        reddit_client: RedditMessageClient | None = None,
         sentiment_analyzer: SimpleSentimentAnalyzer | None = None,
     ) -> None:
         self.settings = settings
         self.db = db
         self.apewisdom_client = apewisdom_client or self._default_apewisdom_client(settings)
-        self.reddit_client = reddit_client or self._default_reddit_client(settings)
         self.sentiment_analyzer = sentiment_analyzer or SimpleSentimentAnalyzer(
             preferred_model=settings.wsb.sentiment_model,
             fallback_model=settings.wsb.fallback_sentiment_model,
@@ -363,49 +211,6 @@ class WsbDataLoader:
         normalized = self._compute_rollups(pd.DataFrame(rows), source="apewisdom")
         self.db.upsert_wsb_mentions(normalized)
         LOGGER.info("Stored ApeWisdom rows=%s", len(normalized))
-        return len(normalized)
-
-    def load_praw_range(self, start_date: date, end_date: date) -> int:
-        messages = list(self.reddit_client.get_messages(start_date, end_date, self.settings.wsb.subreddit))
-        if not messages:
-            return 0
-
-        rows: list[dict[str, object]] = []
-        grouped: dict[tuple[date, str], list[RedditMessage]] = {}
-        for message in messages:
-            ensure_utc_timestamp(message.created_at, label=f"{message.ticker}.created_at")
-            ensure_utc_timestamp(message.as_of_timestamp, label=f"{message.ticker}.as_of_timestamp")
-            grouped.setdefault((message.created_at.date(), message.ticker), []).append(message)
-
-        for (trade_date, ticker), bucket in grouped.items():
-            scores = [self.sentiment_analyzer.score(message.text) for message in bucket]
-            dominant_count = sum(1 for score in scores if self._label(score) == self._dominant_label(scores))
-            total_labeled = sum(1 for score in scores if self._label(score) != "neutral")
-            sentiment_unanimity = None if total_labeled == 0 else dominant_count / total_labeled
-            average_score = None if not scores else float(sum(scores) / len(scores))
-            upvotes = float(sum(message.score for message in bucket))
-            as_of_timestamp = max(message.as_of_timestamp for message in bucket)
-            rows.append(
-                {
-                    "date": trade_date.isoformat(),
-                    "ticker": ticker,
-                    "mention_count": float(len(bucket)),
-                    "mention_count_prior_day": None,
-                    "mention_velocity_pct": None,
-                    "mention_vs_baseline": None,
-                    "sentiment_score": average_score,
-                    "sentiment_unanimity": sentiment_unanimity,
-                    "upvotes": upvotes,
-                    "rank": None,
-                    "rank_change_24h": None,
-                    "as_of_timestamp": as_of_timestamp.isoformat(),
-                    "source": "praw",
-                }
-            )
-
-        normalized = self._compute_rollups(pd.DataFrame(rows), source="praw")
-        self.db.upsert_wsb_mentions(normalized)
-        LOGGER.info("Stored PRAW rows=%s", len(normalized))
         return len(normalized)
 
     def load_kaggle_history(self, dataset_path: Path | None = None) -> int:
@@ -515,22 +320,6 @@ class WsbDataLoader:
             return StubApeWisdomClient()
 
     @staticmethod
-    def _default_reddit_client(settings: AppSettings) -> RedditMessageClient:
-        credentials = settings.providers.reddit
-        if credentials.client_id and credentials.client_secret:
-            try:
-                return RedditOauthClient(settings)
-            except Exception as exc:
-                if not settings.pipeline.use_stub_fallback:
-                    raise
-                LOGGER.warning("Falling back to stub Reddit client: %s", exc)
-        elif not settings.pipeline.use_stub_fallback:
-            raise ValueError("Reddit credentials are required when stub fallback is disabled")
-        else:
-            LOGGER.warning("Reddit credentials not configured; falling back to stub Reddit client")
-        return StubRedditMessageClient()
-
-    @staticmethod
     def _dominant_label(scores: list[float]) -> str:
         labels = [WsbDataLoader._label(score) for score in scores if WsbDataLoader._label(score) != "neutral"]
         if not labels:
@@ -571,8 +360,6 @@ def load_wsb_from_config(
     total = 0
     if "apewisdom" in settings.wsb.sources:
         total += loader.load_apewisdom_range(start_date, end_date)
-    if "praw" in settings.wsb.sources:
-        total += loader.load_praw_range(start_date, end_date)
     if "kaggle" in settings.wsb.sources:
         total += loader.load_kaggle_history()
     return total
