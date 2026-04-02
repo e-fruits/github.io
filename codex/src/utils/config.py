@@ -29,9 +29,9 @@ class PriceVolumeSettings(BaseModel):
 
 
 class CatalystSettings(BaseModel):
-    sources: list[str] = Field(default_factory=lambda: ["finnhub", "yahoo_finance"])
-    include_earnings: bool = True
-    include_analyst_actions: bool = True
+    sources: list[str] = Field(default_factory=lambda: ["google_news", "yahoo_finance"])
+    include_earnings: bool = False
+    include_analyst_actions: bool = False
     include_fda_events: bool = True
     include_company_news: bool = True
     chunk_size: int = 250
@@ -148,6 +148,10 @@ class YahooFinanceSettings(BaseModel):
     enabled: bool = True
 
 
+class GoogleNewsSettings(BaseModel):
+    enabled: bool = True
+
+
 class ApeWisdomSettings(BaseModel):
     base_url: str = "https://apewisdom.io/api/v1.0"
 
@@ -161,6 +165,7 @@ class ProviderSettings(BaseModel):
     schwab: SchwabSettings = Field(default_factory=SchwabSettings)
     finnhub: FinnhubSettings = Field(default_factory=FinnhubSettings)
     yahoo_finance: YahooFinanceSettings = Field(default_factory=YahooFinanceSettings)
+    google_news: GoogleNewsSettings = Field(default_factory=GoogleNewsSettings)
     apewisdom: ApeWisdomSettings = Field(default_factory=ApeWisdomSettings)
     finra: FinraSettings = Field(default_factory=FinraSettings)
 

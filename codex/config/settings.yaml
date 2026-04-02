@@ -16,10 +16,10 @@ price_volume:
 
 catalysts:
   sources:
-    - finnhub
+    - google_news
     - yahoo_finance
-  include_earnings: true
-  include_analyst_actions: true
+  include_earnings: false
+  include_analyst_actions: false
   include_fda_events: true
   include_company_news: true
   chunk_size: 250
@@ -102,10 +102,9 @@ providers:
   schwab:
     app_key: ""
     app_secret: ""
-  finnhub:
-    api_key: "d766kgpr01qm4b7t5ig0d766kgpr01qm4b7t5igg"
-    base_url: "https://finnhub.io/api/v1"
   yahoo_finance:
+    enabled: true
+  google_news:
     enabled: true
   apewisdom:
     base_url: "https://apewisdom.io/api/v1.0"

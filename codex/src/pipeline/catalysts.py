@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import logging
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Protocol
+from urllib.parse import quote_plus
+
+import requests
 
 from src.utils.config import AppSettings, load_settings
 from src.utils.db import DatabaseManager
@@ -274,6 +278,246 @@ class FinnhubCatalystClient:
             return None
 
 
+class YahooFinanceNewsCatalystClient:
+    """Direct Yahoo Finance RSS-backed news catalyst client."""
+
+    POSITIVE_NEWS_KEYWORDS = FinnhubCatalystClient.POSITIVE_NEWS_KEYWORDS
+    NEGATIVE_NEWS_KEYWORDS = FinnhubCatalystClient.NEGATIVE_NEWS_KEYWORDS
+    REGULATORY_KEYWORDS = FinnhubCatalystClient.REGULATORY_KEYWORDS
+
+    def __init__(self, settings: AppSettings) -> None:
+        self.settings = settings
+        self.timeout_seconds = settings.pipeline.request_timeout_seconds
+        self.cache_dir = settings.pipeline.cache_dir
+        self.session = requests.Session()
+
+    def get_events(self, ticker: str, start_date: date, end_date: date) -> Iterable[CatalystEvent]:
+        feed_urls = [
+            f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={quote_plus(ticker)}&region=US&lang=en-US",
+            f"https://finance.yahoo.com/rss/headline?s={quote_plus(ticker)}",
+        ]
+
+        payload = None
+        for feed_url in feed_urls:
+            try:
+                payload = self._get_feed_xml(feed_url, ticker)
+            except requests.RequestException as exc:
+                LOGGER.warning("Yahoo Finance RSS failed for %s via %s: %s", ticker, feed_url, exc)
+                continue
+            if payload:
+                break
+
+        if not payload:
+            return []
+
+        try:
+            root = ET.fromstring(payload)
+        except ET.ParseError as exc:
+            LOGGER.warning("Yahoo Finance RSS parse failed for %s: %s", ticker, exc)
+            return []
+
+        channel = root.find("channel")
+        if channel is None:
+            channel = root.find("./rss/channel")
+        if channel is None:
+            return []
+
+        events: list[CatalystEvent] = []
+        for item in channel.findall("item"):
+            title = (item.findtext("title") or "").strip()
+            description = (item.findtext("description") or "").strip()
+            pub_date = self._parse_rss_timestamp(item.findtext("pubDate"))
+            if not title or pub_date is None:
+                continue
+            if not (start_date <= pub_date.date() <= end_date):
+                continue
+
+            combined_text = f"{title} {description}".lower()
+            is_regulatory = any(keyword in combined_text for keyword in self.REGULATORY_KEYWORDS)
+            source_name = self._extract_source(item)
+            events.append(
+                CatalystEvent(
+                    trade_date=pub_date.date(),
+                    ticker=ticker,
+                    event_type="fda_decision" if is_regulatory else "company_news",
+                    detail=title,
+                    source=source_name,
+                    source_timestamp=pub_date,
+                    as_of_timestamp=pub_date,
+                    direction_hint=self._infer_news_direction(combined_text),
+                )
+            )
+        return events
+
+    def _get_feed_xml(self, url: str, ticker: str) -> str | None:
+        cache_path = self.cache_dir / "yahoo_finance" / "news" / ticker / f"{date.today().isoformat()}.xml"
+        if cache_path.exists():
+            return cache_path.read_text(encoding="utf-8")
+
+        response = self.session.get(url, timeout=self.timeout_seconds)
+        response.raise_for_status()
+        payload = response.text
+        if "<rss" not in payload.lower():
+            return None
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(payload, encoding="utf-8")
+        return payload
+
+    def _extract_source(self, item: ET.Element) -> str:
+        source_text = (item.findtext("source") or "").strip()
+        if source_text:
+            return source_text
+        creator_text = item.findtext("{http://purl.org/dc/elements/1.1/}creator")
+        if creator_text:
+            return creator_text.strip()
+        return "Yahoo"
+
+    def _infer_news_direction(self, text: str) -> str:
+        positive_hits = sum(1 for keyword in self.POSITIVE_NEWS_KEYWORDS if keyword in text)
+        negative_hits = sum(1 for keyword in self.NEGATIVE_NEWS_KEYWORDS if keyword in text)
+        if positive_hits > negative_hits:
+            return "positive"
+        if negative_hits > positive_hits:
+            return "negative"
+        return "ambiguous"
+
+    @staticmethod
+    def _parse_rss_timestamp(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        formats = [
+            "%a, %d %b %Y %H:%M:%S %z",
+            "%a, %d %b %Y %H:%M:%S GMT",
+        ]
+        for fmt in formats:
+            try:
+                parsed = datetime.strptime(value, fmt)
+                return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+        return None
+
+
+class GoogleNewsRssCatalystClient:
+    """Google News RSS-backed catalyst client with broad source coverage."""
+
+    POSITIVE_NEWS_KEYWORDS = FinnhubCatalystClient.POSITIVE_NEWS_KEYWORDS
+    NEGATIVE_NEWS_KEYWORDS = FinnhubCatalystClient.NEGATIVE_NEWS_KEYWORDS
+    REGULATORY_KEYWORDS = FinnhubCatalystClient.REGULATORY_KEYWORDS
+
+    def __init__(self, settings: AppSettings) -> None:
+        self.settings = settings
+        self.timeout_seconds = settings.pipeline.request_timeout_seconds
+        self.cache_dir = settings.pipeline.cache_dir
+        self.session = requests.Session()
+
+    def get_events(self, ticker: str, start_date: date, end_date: date) -> Iterable[CatalystEvent]:
+        query = quote_plus(f'"{ticker}" stock')
+        url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+
+        try:
+            payload = self._get_feed_xml(url, ticker)
+        except requests.RequestException as exc:
+            LOGGER.warning("Google News RSS failed for %s: %s", ticker, exc)
+            return []
+        if not payload:
+            return []
+
+        try:
+            root = ET.fromstring(payload)
+        except ET.ParseError as exc:
+            LOGGER.warning("Google News RSS parse failed for %s: %s", ticker, exc)
+            return []
+
+        channel = root.find("channel")
+        if channel is None:
+            channel = root.find("./rss/channel")
+        if channel is None:
+            return []
+
+        events: list[CatalystEvent] = []
+        for item in channel.findall("item"):
+            title = (item.findtext("title") or "").strip()
+            description = (item.findtext("description") or "").strip()
+            pub_date = YahooFinanceNewsCatalystClient._parse_rss_timestamp(item.findtext("pubDate"))
+            if not title or pub_date is None:
+                continue
+            if not (start_date <= pub_date.date() <= end_date):
+                continue
+            combined_text = f"{title} {description}".lower()
+            upper_title = title.upper()
+            if ticker.upper() not in upper_title and f" {ticker.upper()} " not in combined_text.upper():
+                continue
+
+            source_name = self._extract_source(item)
+            is_regulatory = any(keyword in combined_text for keyword in self.REGULATORY_KEYWORDS)
+            events.append(
+                CatalystEvent(
+                    trade_date=pub_date.date(),
+                    ticker=ticker,
+                    event_type="fda_decision" if is_regulatory else "company_news",
+                    detail=title,
+                    source=source_name,
+                    source_timestamp=pub_date,
+                    as_of_timestamp=pub_date,
+                    direction_hint=self._infer_news_direction(combined_text),
+                )
+            )
+        return events
+
+    def _get_feed_xml(self, url: str, ticker: str) -> str | None:
+        cache_path = self.cache_dir / "google_news" / ticker / f"{date.today().isoformat()}.xml"
+        if cache_path.exists():
+            return cache_path.read_text(encoding="utf-8")
+
+        response = self.session.get(url, timeout=self.timeout_seconds)
+        response.raise_for_status()
+        payload = response.text
+        if "<rss" not in payload.lower():
+            return None
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(payload, encoding="utf-8")
+        return payload
+
+    @staticmethod
+    def _extract_source(item: ET.Element) -> str:
+        source_element = item.find("source")
+        if source_element is not None and source_element.text:
+            return source_element.text.strip()
+        return "Google News"
+
+    def _infer_news_direction(self, text: str) -> str:
+        positive_hits = sum(1 for keyword in self.POSITIVE_NEWS_KEYWORDS if keyword in text)
+        negative_hits = sum(1 for keyword in self.NEGATIVE_NEWS_KEYWORDS if keyword in text)
+        if positive_hits > negative_hits:
+            return "positive"
+        if negative_hits > positive_hits:
+            return "negative"
+        return "ambiguous"
+
+
+class CombinedNewsCatalystClient:
+    """Combine low-friction news feeds without requiring Finnhub."""
+
+    def __init__(self, clients: list[CatalystClient]) -> None:
+        self.clients = clients
+
+    def get_events(self, ticker: str, start_date: date, end_date: date) -> Iterable[CatalystEvent]:
+        seen: set[tuple[str, str, str, str]] = set()
+        for client in self.clients:
+            for event in client.get_events(ticker, start_date, end_date):
+                key = (
+                    event.trade_date.isoformat(),
+                    event.event_type,
+                    event.detail,
+                    event.source_timestamp.isoformat(),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield event
+
+
 class CatalystLoader:
     def __init__(self, settings: AppSettings, db: DatabaseManager, client: CatalystClient) -> None:
         self.settings = settings
@@ -374,13 +618,21 @@ def load_catalysts_from_config(
     settings = load_settings(settings_path)
     db = DatabaseManager(settings.database.path)
     db.initialize()
+    selected_sources = {source.strip().lower() for source in settings.catalysts.sources if source.strip()}
+    news_clients: list[CatalystClient] = []
+
+    if "google_news" in selected_sources and settings.providers.google_news.enabled:
+        news_clients.append(GoogleNewsRssCatalystClient(settings))
+    if "yahoo_finance" in selected_sources and settings.providers.yahoo_finance.enabled:
+        news_clients.append(YahooFinanceNewsCatalystClient(settings))
+
     client: CatalystClient
-    if settings.providers.finnhub.api_key:
-        client = FinnhubCatalystClient(settings)
-    else:
-        if not settings.pipeline.use_stub_fallback:
-            raise ValueError("Finnhub API key is required when stub fallback is disabled")
-        LOGGER.warning("Finnhub API key not configured; falling back to stub catalyst client")
+    if news_clients:
+        client = CombinedNewsCatalystClient(news_clients)
+    elif settings.pipeline.use_stub_fallback:
+        LOGGER.warning("No live catalyst news sources are enabled; falling back to stub catalyst client")
         client = StubCatalystClient()
+    else:
+        raise ValueError("At least one live catalyst source must be enabled when stub fallback is disabled")
     loader = CatalystLoader(settings=settings, db=db, client=client)
     return loader.load_range(start_date=start_date, end_date=end_date, tickers=tickers)
